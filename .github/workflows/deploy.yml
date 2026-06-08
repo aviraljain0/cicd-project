@@ -55,7 +55,7 @@ jobs:
         run: |
           docker push ${{ secrets.DOCKER_USERNAME }}/cicd-app:latest
 
-  # ─── JOB 3: DEPLOY TO EC2 ──────────────────────────────
+ # ─── JOB 3: DEPLOY WITH ROLLBACK ──────────────────────
   deploy:
     name: Deploy to AWS EC2
     runs-on: ubuntu-latest
@@ -69,10 +69,14 @@ jobs:
           username: ubuntu
           key: ${{ secrets.EC2_SSH_KEY }}
           script: |
+            # Save current running image as backup
+            CURRENT_IMAGE=$(docker inspect --format='{{.Config.Image}}' cicd-app 2>/dev/null || echo "none")
+            echo "Current image: $CURRENT_IMAGE"
+
             # Pull latest image
             docker pull ${{ secrets.DOCKER_USERNAME }}/cicd-app:latest
 
-            # Stop and remove old container if running
+            # Stop and remove old container
             docker stop cicd-app || true
             docker rm cicd-app || true
 
@@ -83,8 +87,21 @@ jobs:
               -p 5000:5000 \
               ${{ secrets.DOCKER_USERNAME }}/cicd-app:latest
 
-            # Health check
+            # Wait for app to start
             sleep 5
-            curl -f http://localhost:5000/health || exit 1
 
-            echo "Deployment successful!"
+            # Health check — if it fails, rollback!
+            if curl -f http://localhost:5000/health; then
+              echo "✅ Health check passed — deployment successful!"
+            else
+              echo "❌ Health check failed — rolling back!"
+              docker stop cicd-app || true
+              docker rm cicd-app || true
+              docker run -d \
+                --name cicd-app \
+                --restart always \
+                -p 5000:5000 \
+                $CURRENT_IMAGE
+              echo "🔄 Rollback complete — previous version restored"
+              exit 1
+            fi
